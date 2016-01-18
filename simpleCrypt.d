@@ -1,5 +1,45 @@
 #!/usr/bin/env rdmd
 
+/*
+ ============================================================================
+ Name        : SimpleCrypt
+ Author      : Rick Kreikebaum
+ Version     : 1.0
+ License     : MIT License (see included LICENSE.txt)
+ Copyright   : Copyright Rick Kreikebaum 2015-2016
+ Description : A simple file encryption/decryption program.
+
+ This application encrypts and decrypts files with a user-supplied password. 
+ The source code can be used to experiment with different ciphers, such as 
+ the included RKC1 (Rick Kreikebaum Cipher 1) cipher, but such experimental 
+ ciphers are likely to be weak, and shouldn't be used for serious data 
+ security. Also implemented is the AES256 cipher, through the third-party
+ crypto.blockcipher.aes module found here: https://github.com/apartridge/crypto.
+ This application may use a hash algorithm to generate a passkey and provide
+ for secure password verification. This is the default, along with the AES256
+ cipher for encryption, but options are provided for different ciphers and 
+ using no hash at all. If no hash is used, the passkey is simply the plaintext
+ password, cycled to the appropriate length for the cipher used. For password
+ verification, a hardcoded string is encrypted with the password on encryption,
+ and this is decrypted and compared with the hardcoded string upon decryption.
+ This method may be vulnerable to plaintext attacks if the cipher used is weak.
+ In other words, it should only be used for experimentation purposes.
+ The default method for password verification is to hash the first 1024 bytes 
+ of the file, then encrypt it with the passkey and write it to the output file.
+ Upon decryption, we reverse the process. The encrypted hash is read and
+ decrypted. Next, 1024 bytes of the file are decrypted and hashed. If that
+ hash matches the just decrypted hash, the password is correct. Otherwise,
+ it is incorrect, and the program exits. The RKC file format used by 
+ SimpleCrypt is designed to be extensible. The 8-byte magic number contains
+ two fields denoting the cipher and the hash used, respectively. These are 
+ converted to enum values used by the program upon decryption, so that 
+ the right algorithms are used when decrypting the file. Since there are 
+ 256 possible values for a byte, one could extend the enums to encode
+ up to 256 different cipher and hash values respectively.
+ 
+ ============================================================================
+ */
+
 import std.stdio;
 import std.range;
 import std.file;
@@ -132,7 +172,7 @@ ubyte[] getPassword(Mode mode) {
 			writeln("Enter the right password to decrypt the file:");
 			break;
 		default:
-			throw new Exception("Invalid mode.");
+			throw new Exception("Invalid mode. Should be Mode.Encrypt or Mode.Decrypt.");
 	}
 
 	passwd = cast(ubyte[])readln.chomp();
@@ -162,6 +202,7 @@ bool doEncryptionTask(string filename, string newfilename, Cipher cipher, Hash h
 	writeFileSize(outFile, inFile);
 	passkey = makePassKey(outFile, passwd, hash);
 	auto encrypt = encryptorInit(passkey, cipher);
+	write("Encrypting...");
 	writeAuthToken(inFile, outFile, hash, encrypt);
 	doEncryptionLoop(inFile, outFile, encrypt);
 	finalizeFiles(filename, newfilename);
@@ -172,6 +213,9 @@ bool doEncryptionTask(string filename, string newfilename, Cipher cipher, Hash h
 void doEncryptionLoop(File inFile, File outFile, Encryptor encrypt) {
 	ubyte[] plaintext = new ubyte[blockSize];
 	ubyte[] ciphertext;
+	int j = 0;
+
+	stdout.setvbuf(0, _IONBF);
 
 	do {
 		plaintext = inFile.rawRead(plaintext);
@@ -181,8 +225,13 @@ void doEncryptionLoop(File inFile, File outFile, Encryptor encrypt) {
 			break;
 		ciphertext = encrypt(plaintext);
 		outFile.rawWrite(ciphertext);
+		if (++j == 50000) {
+			write(".");
+			j = 0;
+		}
 	} while (!inFile.eof);
 	
+	writeln();
 	inFile.close();
 	outFile.close();
 }
@@ -219,6 +268,7 @@ bool doDecryptionTask(string filename, string newfilename) {
 		return false;
 	}
 
+	write("Decrypting...");
 	doDecryptionLoop(inFile, outFile, decrypt, fsize);
 	finalizeFiles(filename, newfilename);
 	writefln("File decrypted as %s.", newfilename);
@@ -231,7 +281,10 @@ void doDecryptionLoop(File inFile, File outFile, Decryptor decrypt, ulong fsize)
 	uint extrabytes = (16 - (fsize % 16));
 	ubyte[] ciphertext = new ubyte[blockSize];
 	uint i = 0;
+	int j = 0;
 	ubyte[] plaintext;
+
+	stdout.setvbuf(0, _IONBF);
 
 	do {
 		ciphertext = inFile.rawRead(ciphertext);
@@ -250,8 +303,13 @@ void doDecryptionLoop(File inFile, File outFile, Decryptor decrypt, ulong fsize)
 
 		outFile.rawWrite(plaintext);
 		i += blockSize;
+		if (++j == 50000) {
+			write(".");
+			j = 0;
+		}
 	} while (!inFile.eof);
-	
+
+	writeln();
 	inFile.close();
 	outFile.close();
 }
