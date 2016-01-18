@@ -10,9 +10,7 @@ import std.string;
 import std.getopt;
 import std.digest.sha;
 import std.bitmanip;
-import fileio;
 import core.sys.posix.termios;
-import core.stdc.stdio;
 import hap.random;
 import crypto.blockcipher.aes;
 
