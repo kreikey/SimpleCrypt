@@ -21,7 +21,7 @@ enum string helpmsg = "usage: simpleCrypt [-h|--help] [-c|--cipher xor|rkc1|aes2
 enum ulong chunkSize = 1048576;
 enum ulong blockSize = 32;	// Should be a multiple of 16 to support AES encryption.
 enum ulong saltLength = 32;
-enum ulong authChunkSize = 1048576;
+enum ulong authChunkSize = 1024;
 enum Mode : ubyte {Encrypt, Decrypt};
 enum Cipher : ubyte {xor = 0, aes256 = 1, rkc1 = 2};
 enum Hash : ubyte {none = 0, sha256 = 1};
@@ -175,11 +175,15 @@ void doEncryptionLoop(File inFile, File outFile, Encryptor encrypt) {
 	ubyte[] plaintext = new ubyte[blockSize];
 	ubyte[] ciphertext;
 
-	while (!inFile.eof) {
+	do {
 		plaintext = inFile.rawRead(plaintext);
+		// This is necessary because we don't reach eof until we try to read the next byte and it fails.
+		// We don't want to attempt to encrypt an empty buffer, even if it's harmless.
+		if (inFile.eof && plaintext.length == 0)
+			break;
 		ciphertext = encrypt(plaintext);
 		outFile.rawWrite(ciphertext);
-	}
+	} while (!inFile.eof);
 	
 	inFile.close();
 	outFile.close();
@@ -231,8 +235,13 @@ void doDecryptionLoop(File inFile, File outFile, Decryptor decrypt, ulong fsize)
 	uint i = 0;
 	ubyte[] plaintext;
 
-	while (!inFile.eof) {
+	do {
 		ciphertext = inFile.rawRead(ciphertext);
+		// This is necessary because we don't reach eof until we try to read the next byte and it fails.
+		// We don't want to attempt to decrypt an empty buffer, because it's not semantically correct,
+		// and it causes a segfault with the aes256 decryptor.
+		if (inFile.eof && ciphertext.length == 0)
+			break;
 		plaintext = decrypt(ciphertext);
 
 		// This is for block ciphers, and harmless for non-block ciphers. It trims the extra bytes 
@@ -243,7 +252,7 @@ void doDecryptionLoop(File inFile, File outFile, Decryptor decrypt, ulong fsize)
 
 		outFile.rawWrite(plaintext);
 		i += blockSize;
-	}
+	} while (!inFile.eof);
 	
 	inFile.close();
 	outFile.close();
