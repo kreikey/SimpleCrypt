@@ -106,6 +106,8 @@ bool openFiles(string filename, string newfilename, ref File inFile, ref File ou
 	try {
 		inFile = File(filename, "rb");
 		outFile = File(".temp_" ~ newfilename, "wb");
+		inFile.setvbuf(chunkSize);
+		outFile.setvbuf(chunkSize);
 	} catch (Exception e) {
 		writeln(e.msg);
 		return false;
@@ -157,39 +159,30 @@ bool doEncryptionTask(string filename, string newfilename, Cipher cipher, Hash h
 		return false;
 
 	ubyte[] passwd = getPassword(Mode.Encrypt);
-	auto ifrange = new ChunkedFileReader(inFile, chunkSize);
-	auto ofrange = new ChunkedFileWriter(outFile, chunkSize);
 
-	writeMagicNumber(ofrange, cipher, hash);
-	writeFileSize(ofrange, ifrange);
-	passkey = makePassKey(ofrange, passwd, hash);
+	writeMagicNumber(outFile, cipher, hash);
+	writeFileSize(outFile, inFile);
+	passkey = makePassKey(outFile, passwd, hash);
 	auto encrypt = encryptorInit(passkey, cipher);
-	writeAuthToken(ifrange, ofrange, hash, encrypt);
-	doEncryptionLoop(ifrange, ofrange, encrypt);
+	writeAuthToken(inFile, outFile, hash, encrypt);
+	doEncryptionLoop(inFile, outFile, encrypt);
 	finalizeFiles(filename, newfilename);
 	writefln("File encrypted as %s.", newfilename);
 	return true;
 }
 
-void doEncryptionLoop(T, U)(T ifrange, U ofrange, Encryptor encrypt)
-if (isInputRange!T && isOutputRange!(U, ubyte[])) {
+void doEncryptionLoop(File inFile, File outFile, Encryptor encrypt) {
 	ubyte[] plaintext = new ubyte[blockSize];
-	ubyte[] rem;
 	ubyte[] ciphertext;
 
-	while (!ifrange.empty) {
-		rem = ifrange.take(plaintext.length).copy(plaintext);
-
-		if (rem.length != 0) {
-			plaintext.length -= rem.length;
-		}
-
+	while (!inFile.eof) {
+		plaintext = inFile.rawRead(plaintext);
 		ciphertext = encrypt(plaintext);
-		ofrange.put(ciphertext);
+		outFile.rawWrite(ciphertext);
 	}
 	
-	ofrange.finish();
-	ifrange.finish();
+	inFile.close();
+	outFile.close();
 }
 
 bool doDecryptionTask(string filename, string newfilename) {
@@ -204,21 +197,18 @@ bool doDecryptionTask(string filename, string newfilename) {
 	if (!openFiles(filename, newfilename, inFile, outFile))
 		return false;
 	
-	auto ifrange = new ChunkedFileReader(inFile, chunkSize);
-	auto ofrange = new ChunkedFileWriter(outFile, chunkSize);
-
-	if (!verifyMagicNumber(ifrange, cipher, hash)) {
+	if (!verifyMagicNumber(inFile, cipher, hash)) {
 		writeln("Not a valid RKC file. Bye.");
 		std.file.rename(".temp_" ~ newfilename, newfilename);
 		return false;
 	}
 
-	auto fsize = readFileSize(ifrange);
+	auto fsize = readFileSize(inFile);
 	auto passwd = getPassword(Mode.Decrypt);
-	passkey = getPassKey(ifrange, passwd, hash);
+	passkey = getPassKey(inFile, passwd, hash);
 	auto decrypt = decryptorInit(passkey, cipher);
 
-	if (verifyPassword(ifrange, hash, decrypt, fsize)) {
+	if (verifyPassword(inFile, hash, decrypt, fsize)) {
 		writeln("Password is correct.");
 	} else {
 		writeln("Password is incorrect. Bye.");
@@ -227,31 +217,22 @@ bool doDecryptionTask(string filename, string newfilename) {
 		return false;
 	}
 
-	doDecryptionLoop(ifrange, ofrange, decrypt, fsize);
+	doDecryptionLoop(inFile, outFile, decrypt, fsize);
 	finalizeFiles(filename, newfilename);
 	writefln("File decrypted as %s.", newfilename);
 
 	return true;
 }
 
-void doDecryptionLoop(T, U)(T ifrange, U ofrange, Decryptor decrypt, ulong fsize)
-if (isInputRange!T && isOutputRange!(U, ubyte[])) {
+void doDecryptionLoop(File inFile, File outFile, Decryptor decrypt, ulong fsize) {
 	// This assumes that all block ciphers implemented have a block size of 16
 	uint extrabytes = (16 - (fsize % 16));
 	ubyte[] ciphertext = new ubyte[blockSize];
-	ubyte[] rem;
 	uint i = 0;
 	ubyte[] plaintext;
 
-	while (!ifrange.empty) {
-		rem = ifrange.take(ciphertext.length).copy(ciphertext);
-
-		// This is for non-block ciphers that encrypt byte by byte, but it's also useful when we want
-		// to decrypt by chunks that are multiples of the block size (for block ciphers).
-		if (rem.length != 0) {
-			ciphertext.length -= rem.length;
-		}
-
+	while (!inFile.eof) {
+		ciphertext = inFile.rawRead(ciphertext);
 		plaintext = decrypt(ciphertext);
 
 		// This is for block ciphers, and harmless for non-block ciphers. It trims the extra bytes 
@@ -260,21 +241,20 @@ if (isInputRange!T && isOutputRange!(U, ubyte[])) {
 		if (i + plaintext.length > fsize)
 			plaintext.length -= extrabytes;
 
-		ofrange.put(plaintext);
+		outFile.rawWrite(plaintext);
 		i += blockSize;
 	}
 	
-	ofrange.finish();
-	ifrange.finish();
+	inFile.close();
+	outFile.close();
 }
 
-ubyte[] makePassKey(T)(T ofrange, ubyte[] passwd, Hash hash)
-if (isOutputRange!(T, ubyte[])) {
+ubyte[] makePassKey(File outFile, ubyte[] passwd, Hash hash) {
 	ubyte[] passkey;
 
 	switch (hash) with (Hash) {
 		case sha256:	
-			auto salt = makeAndWriteSalt(ofrange);
+			auto salt = makeAndWriteSalt(outFile);
 			passkey = sha256Of(salt ~ passwd).dup;
 			break;
 		case none:
@@ -287,14 +267,13 @@ if (isOutputRange!(T, ubyte[])) {
 	return passkey;
 }
 
-ubyte[] getPassKey(T)(T ifrange, ubyte[] passwd, Hash hash)
-if (isInputRange!T) {
+ubyte[] getPassKey(File inFile, ubyte[] passwd, Hash hash) {
 	ubyte[] passkey;
 	auto keyCycle = cycle(passwd);
 
 	switch (hash) with (Hash) {
 		case sha256:
-			auto salt = readSalt(ifrange);
+			auto salt = readSalt(inFile);
 			passkey = sha256Of(salt ~ passwd).dup;
 			break;
 		case none:
@@ -319,14 +298,13 @@ bool finalizeFiles(string filename, string newfilename) {
 	return true;
 }
 
-bool verifyMagicNumber(T)(T ifrange, ref Cipher cipher, ref Hash hash)
-if (isInputRange!T) {
+bool verifyMagicNumber(File inFile, ref Cipher cipher, ref Hash hash) {
 	bool result = true;
 	ubyte[] magicbuf = new ubyte[8];
 	ubyte[] ciphermembers = cast(ubyte[]) [EnumMembers!Cipher];
 	ubyte[] hashmembers = cast(ubyte[]) [EnumMembers!Hash];
 
-	ifrange.take(magicbuf.length).copy(magicbuf);
+	magicbuf = inFile.rawRead(magicbuf);
 
 	if (magicbuf[0..4] != cast(ubyte[])".RKC")
 		result = false;
@@ -347,40 +325,41 @@ if (isInputRange!T) {
 	return result;
 }
 
-void writeMagicNumber(T)(T ofrange, Cipher cipher, Hash hash) 
-if (isOutputRange!(T, ubyte[])) {
+void writeMagicNumber(File outFile, Cipher cipher, Hash hash) {
 	ubyte[8] magicnumber;
 	magicnumber[0..4] = cast(ubyte[])".RKC";
 	magicnumber[4] = 0xEE;
 	magicnumber[5] = cipher;
 	magicnumber[6] = hash;
 	magicnumber[7] = 0xEE;
-	ofrange.put(magicnumber);
+	outFile.rawWrite(magicnumber);
 }
 
-bool verifyPassword(T)(T ifrange, Hash hash, Decryptor decrypt, ulong fsize) 
-if (isInputRange!T) {
+bool verifyPassword(File inFile, Hash hash, Decryptor decrypt, ulong fsize) {
 	ubyte[] authbuffer;
 	ubyte[] savedauthbuffer;
 	ulong savedAuthChunkSize;
 	ubyte[] ifbuffer;
+	ulong pos;
+	uint extrabytes = 16 - (fsize % 16);
 
-	savedAuthChunkSize = readAuthChunkSize(ifrange, hash);
-	//writefln("authChunkSize: %d read", savedAuthChunkSize);
-	savedauthbuffer = readAuthToken(ifrange, hash, decrypt);
+	savedAuthChunkSize = readAuthChunkSize(inFile, hash);
+	savedauthbuffer = readAuthToken(inFile, hash, decrypt);
 
 	switch (hash) with (Hash) {
 		case none:
 			authbuffer = authtoken.map!(a => cast(ubyte)a).array();
 			break;
 		case sha256:
-			auto ircopy = ifrange.save;
-			ifbuffer = ircopy.take(savedAuthChunkSize).array();
+			pos = inFile.tell();
+			ifbuffer = new ubyte[savedAuthChunkSize];
+			ifbuffer = inFile.rawRead(ifbuffer);
 			ifbuffer = decrypt(ifbuffer);
 			if (ifbuffer.length > fsize) {
-				ifbuffer.length -= (16 - (fsize % 16));
+				ifbuffer.length -= extrabytes;
 			}
 			authbuffer = sha256Of(ifbuffer).dup;
+			inFile.seek(pos);
 			break;
 		default:
 			throw new Exception("Invalid hash.");
@@ -389,19 +368,19 @@ if (isInputRange!T) {
 	return savedauthbuffer == authbuffer;
 }
 
-ulong readAuthChunkSize(T)(T ifrange, Hash hash) 
-if (isInputRange!T) {
+ulong readAuthChunkSize(File inFile, Hash hash) {
 	ulong chunkSize;
-	//ubyte[] buf = new ubyte[8];
-	ubyte[8] buf;
+	ubyte[] buf;
+	ubyte[8] temp;
 
 	switch (hash) with (Hash) {
 		case none:
 			break;
 		case sha256:
-			//chunkSize = ifrange.take(8).array.convertUbyteArrayToUlong();
-			buf = ifrange.take(8).array();
-			chunkSize = littleEndianToNative!ulong(buf);
+		 	buf = new ubyte[8];	
+			buf = inFile.rawRead(buf);
+			temp = buf;
+			chunkSize = littleEndianToNative!ulong(temp);
 			break;
 		default:
 	}
@@ -409,56 +388,56 @@ if (isInputRange!T) {
 	return chunkSize;
 }
 
-void writeFileSize(T, U)(T ofrange, U ifrange)
-if (isOutputRange!(T, ubyte[]) && isInputRange!(U) && hasMember!(U, "fileSize")) {
-	ulong fsize = ifrange.fileSize;
+void writeFileSize(File outFile, File inFile) {
+	ulong fsize = inFile.size;
 	ubyte[] sizearr;
 
-	//sizearr = convertUlongToUbyteArray(fsize);
 	sizearr = nativeToLittleEndian(fsize);
-	ofrange.put(sizearr);
+	outFile.rawWrite(sizearr);
 }
 
-ulong readFileSize(T)(T ifrange)
-if (isInputRange!T) {
+ulong readFileSize(File inFile) {
 	ulong fsize;
-	//ubyte[] sizearr = new ubyte[8];
-	ubyte[8] sizearr;
+	ubyte[] sizearr = new ubyte[8];
+	ubyte[8] temp;
+	//ubyte[] sizearr;
 
-	//ifrange.take(sizearr.length).copy(sizearr);
-	//fsize = convertUbyteArrayToUlong(sizearr);
-	sizearr = ifrange.take(sizearr.length).array();
-	fsize = littleEndianToNative!ulong(sizearr);
+	sizearr = inFile.rawRead(sizearr);
+	temp = sizearr;
+	fsize = littleEndianToNative!ulong(temp);
 
 	return fsize;
 }
 
-ubyte[] makeAndWriteSalt(T)(T ofrange)
-if (isOutputRange!(T, ubyte[])) {
+ubyte[] makeAndWriteSalt(File outFile) {
 	auto saltarr = uniformDistribution(0, 256)
 					.map!(a => a.to!ubyte)
 					.take(saltLength)
 					.array();
+	outFile.rawWrite(saltarr);
 
-	ofrange.put(saltarr);
 	return saltarr;
 }
 
-ubyte[] readSalt(T)(T ifrange)
-if (isInputRange!T) {
-	return ifrange.take(saltLength).array();
+ubyte[] readSalt(File inFile) {
+	ubyte[] saltarr = new ubyte[saltLength];
+
+	saltarr = inFile.rawRead(saltarr);
+
+	return saltarr;
 }
 
-ubyte[] readAuthToken(T)(T ifrange, Hash hash, Decryptor decrypt) 
-if (isInputRange!T) {
+ubyte[] readAuthToken(File inFile, Hash hash, Decryptor decrypt) {
 	ubyte[] token;
 
 	switch (hash) with (Hash) {
 		case none:
-			token = ifrange.take(authtoken.length).array();
+			token = new ubyte[authtoken.length];
+			token = inFile.rawRead(token);
 			break;
 		case sha256:
-			token = ifrange.take(32).array();
+			token = new ubyte[32];
+			token = inFile.rawRead(token);
 			break;
 		default:
 			throw new Exception("Invalid hash.");
@@ -470,28 +449,28 @@ if (isInputRange!T) {
 
 // I want to modify this function to first write a ulong from the file to determine 
 // the size of the chunk of the file that we want to hash to generate the token.
-void writeAuthToken(T, U)(T ifrange, U ofrange, Hash hash, Encryptor encrypt)
-if (isInputRange!T && isOutputRange!(U, ubyte[])) {
+void writeAuthToken(File inFile, File outFile, Hash hash, Encryptor encrypt) {
 	ubyte[] token;
+	ubyte[] buf;
+	ulong pos;
 
 	switch (hash) with (Hash) {
 		case none:
 			token = cast(ubyte[])(authtoken.dup);
-			ofrange.put(encrypt(token));
+			outFile.rawWrite(encrypt(token));
 			break;
 		case sha256:
-			//ofrange.put(convertUlongToUbyteArray(authChunkSize));
-			ofrange.put(nativeToLittleEndian(authChunkSize));
-			//writefln("authChunkSize: %d written", authChunkSize);
-			auto ircopy = ifrange.save;
-			auto buf = ircopy.take(authChunkSize).array();
+			outFile.rawWrite(nativeToLittleEndian(authChunkSize));
+			pos = inFile.tell();
+			buf = new ubyte[authChunkSize];
+			buf = inFile.rawRead(buf);
 			token = sha256Of(buf).dup;
-			ofrange.put(encrypt(token));
+			outFile.rawWrite(encrypt(token));
+			inFile.seek(pos);
 			break;
 		default:
 			throw new Exception("Invalid hash.");
 	}
-
 }
 
 auto encryptorInit(ubyte[] passkey, Cipher cipher) {
