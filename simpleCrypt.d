@@ -5,7 +5,7 @@
  Name        : SimpleCrypt
  Author      : Rick Kreikebaum
  Version     : 1.0
- License     : MIT License (see included LICENSE.txt)
+ License     : MIT License (see included LICENSE)
  Copyright   : Copyright Rick Kreikebaum 2015-2016
  Description : A simple file encryption/decryption program.
 
