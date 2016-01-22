@@ -4,7 +4,7 @@
  ============================================================================
  Name        : SimpleCrypt
  Author      : Rick Kreikebaum
- Version     : 1.0
+ Version     : 1.1
  License     : MIT License (see included LICENSE)
  Copyright   : Copyright Rick Kreikebaum 2015-2016
  Description : A simple file encryption/decryption program.
@@ -201,7 +201,7 @@ bool doEncryptionTask(string filename, string newfilename, Cipher cipher, Hash h
 	writeMagicNumber(outFile, cipher, hash);
 	writeFileSize(outFile, inFile);
 	passkey = makePassKey(outFile, passwd, hash);
-	auto encrypt = encryptorInit(passkey, cipher);
+	Encryptor encrypt = encryptorInit(passkey, cipher);
 	write("Encrypting...");
 	writeAuthToken(inFile, outFile, hash, encrypt);
 	doEncryptionLoop(inFile, outFile, encrypt);
@@ -242,6 +242,7 @@ bool doDecryptionTask(string filename, string newfilename) {
 	Cipher cipher;
 	Hash hash;
 	ubyte[] passkey;
+	Decryptor decrypt;
 
 	writefln("I see you want to decrypt the file %s", filename);
 
@@ -257,9 +258,9 @@ bool doDecryptionTask(string filename, string newfilename) {
 	auto fsize = readFileSize(inFile);
 	auto passwd = getPassword(Mode.Decrypt);
 	passkey = getPassKey(inFile, passwd, hash);
-	auto decrypt = decryptorInit(passkey, cipher);
+	decrypt = decryptorInit(passkey, cipher, fsize);
 
-	if (verifyPassword(inFile, hash, decrypt, fsize)) {
+	if (verifyPassword(inFile, hash, decrypt)) {
 		writeln("Password is correct.");
 	} else {
 		writeln("Password is incorrect. Bye.");
@@ -268,6 +269,7 @@ bool doDecryptionTask(string filename, string newfilename) {
 		return false;
 	}
 
+	decrypt = decryptorInit(passkey, cipher, fsize);
 	write("Decrypting...");
 	doDecryptionLoop(inFile, outFile, decrypt, fsize);
 	finalizeFiles(filename, newfilename);
@@ -288,18 +290,14 @@ void doDecryptionLoop(File inFile, File outFile, Decryptor decrypt, ulong fsize)
 
 	do {
 		ciphertext = inFile.rawRead(ciphertext);
+
 		// This is necessary because we don't reach eof until we try to read the next byte and it fails.
 		// We don't want to attempt to decrypt an empty buffer, because it's not semantically correct,
 		// and it causes a segfault with the aes256 decryptor.
 		if (inFile.eof && ciphertext.length == 0)
 			break;
-		plaintext = decrypt(ciphertext);
 
-		// This is for block ciphers, and harmless for non-block ciphers. It trims the extra bytes 
-		// from the last block by comparing the accumulated plaintext length with the original file size.
-		// If said length is greater, we trim the block by the previously computed number of extra bytes.
-		if (i + plaintext.length > fsize)
-			plaintext.length -= extrabytes;
+		plaintext = decrypt(ciphertext);
 
 		outFile.rawWrite(plaintext);
 		i += blockSize;
@@ -400,13 +398,12 @@ void writeMagicNumber(File outFile, Cipher cipher, Hash hash) {
 	outFile.rawWrite(magicnumber);
 }
 
-bool verifyPassword(File inFile, Hash hash, Decryptor decrypt, ulong fsize) {
+bool verifyPassword(File inFile, Hash hash, Decryptor decrypt) {
 	ubyte[] authbuffer;
 	ubyte[] savedauthbuffer;
 	ulong savedAuthChunkSize;
 	ubyte[] ifbuffer;
 	ulong pos;
-	uint extrabytes = 16 - (fsize % 16);
 
 	savedAuthChunkSize = readAuthChunkSize(inFile, hash);
 	savedauthbuffer = readAuthToken(inFile, hash, decrypt);
@@ -420,9 +417,6 @@ bool verifyPassword(File inFile, Hash hash, Decryptor decrypt, ulong fsize) {
 			ifbuffer = new ubyte[savedAuthChunkSize];
 			ifbuffer = inFile.rawRead(ifbuffer);
 			ifbuffer = decrypt(ifbuffer);
-			if (ifbuffer.length > fsize) {
-				ifbuffer.length -= extrabytes;
-			}
 			authbuffer = sha256Of(ifbuffer).dup;
 			inFile.seek(pos);
 			break;
@@ -465,7 +459,6 @@ ulong readFileSize(File inFile) {
 	ulong fsize;
 	ubyte[] sizearr = new ubyte[8];
 	ubyte[8] temp;
-	//ubyte[] sizearr;
 
 	sizearr = inFile.rawRead(sizearr);
 	temp = sizearr;
@@ -512,8 +505,6 @@ ubyte[] readAuthToken(File inFile, Hash hash, Decryptor decrypt) {
 	return token;
 }
 
-// I want to modify this function to first write a ulong from the file to determine 
-// the size of the chunk of the file that we want to hash to generate the token.
 void writeAuthToken(File inFile, File outFile, Hash hash, Encryptor encrypt) {
 	ubyte[] token;
 	ubyte[] buf;
@@ -538,102 +529,111 @@ void writeAuthToken(File inFile, File outFile, Hash hash, Encryptor encrypt) {
 	}
 }
 
-auto encryptorInit(ubyte[] passkey, Cipher cipher) {
+Encryptor encryptorInit(ubyte[] passkey, Cipher cipher) {
+	Encryptor encryptor;
 	ubyte[] keybuf;
-
 	auto keyCycle = cycle(passkey);
 	AES256 aes;
 
+	ubyte[] xorencryptor(ubyte[] buffer) {
+		keybuf.length = buffer.length;
+		keyCycle.take(keybuf.length).copy(keybuf);
+		xorxcryptbuff(buffer, keybuf);
+		return buffer;
+	}
+
+	ubyte[] rkc1encryptor(ubyte[] buffer) {
+		keybuf.length = buffer.length;
+		keyCycle.take(buffer.length).copy(keybuf);
+		rkc1encryptbuff(buffer, keybuf);
+		return buffer;
+	}
+
+	ubyte[] aes256encryptor(ubyte[] buffer) {
+		int rem = buffer.length % 16;
+		if (rem != 0)
+			buffer.length += (16 - rem);
+
+		for (int i = 0; i < buffer.length; i += 16) {
+			aes.encrypt(buffer[i..i+16]);					
+		}
+		return buffer;
+	}
+
 	switch (cipher) with (Cipher) {
 		case xor:
+			encryptor = &xorencryptor;
 			break;
 		case rkc1:
+			encryptor = &rkc1encryptor;
 			break;
 		case aes256:
 			keybuf = keyCycle.take(32).array();
 			aes = new AES256(keybuf);
+			encryptor = &aes256encryptor;
 			break;
 		default:
 			throw new Exception("Invalid cipher.");
 	}
 
-	ubyte[] encryptor(ubyte[] buffer) {
-		switch (cipher) with (Cipher) {
-			case xor:
-				keybuf.length = buffer.length;
-				keyCycle.take(keybuf.length).copy(keybuf);
-				xorxcryptbuff(buffer, keybuf);
-				break;
-			case rkc1:
-				keybuf.length = buffer.length;
-				keyCycle.take(buffer.length).copy(keybuf);
-				rkc1encryptbuff(buffer, keybuf);
-				break;
-			case aes256:
-				int rem = buffer.length % 16;
-				if (rem != 0)
-					buffer.length += (16 - rem);
-
-				for (int i = 0; i < buffer.length; i += 16) {
-					aes.encrypt(buffer[i..i+16]);					
-				}
-				break;
-			default:
-				assert(0);
-		}
-
-		return buffer;
-	}
-
-	return &encryptor;
+	return encryptor;
 }
 
-auto decryptorInit(ubyte[] passkey, Cipher cipher) {
+Decryptor decryptorInit(ubyte[] passkey, Cipher cipher, ulong fsize) {
+	Decryptor decryptor;
 	ubyte[] keybuf;
-
 	auto keyCycle = cycle(passkey);
 	AES256 aes;
+	ulong pos;
+
+	ubyte[] xordecryptor(ubyte[] buffer) {
+		keybuf.length = buffer.length;
+		keyCycle.take(keybuf.length).copy(keybuf);
+		xorxcryptbuff(buffer, keybuf);
+		return buffer;
+	}
+
+	ubyte[] rkc1decryptor(ubyte[] buffer) {
+		keybuf.length = buffer.length;
+		keyCycle.take(keybuf.length).copy(keybuf);
+		rkc1decryptbuff(buffer, keybuf);
+		return buffer;
+	}
+
+	ubyte[] aes256decryptor(ubyte[] buffer) {		
+		if (buffer.length % 16 != 0)
+			throw new Exception("Decryption buffer with AES256 encryption is not a multiple of 16! This indicates a corrupt file.");
+		
+		pos += buffer.length;
+	
+		for (int i = 0; i < buffer.length; i += 16) {
+			aes.decrypt(buffer[i..i+16]);					
+		}
+
+		if (pos > fsize) {
+			buffer.length -= 16 - (fsize % 16);
+		}
+
+		return buffer;	
+	}
 
 	switch (cipher) with (Cipher) {
 		case xor:
+			decryptor = &xordecryptor;
 			break;
 		case rkc1:
+			decryptor = &rkc1decryptor;
 			break;
 		case aes256:
 			keybuf = keyCycle.take(32).array();
 			aes = new AES256(keybuf);
+			decryptor = &aes256decryptor;
 			break;
 		default:
 			throw new Exception("Invalid cipher.");
 	}
 
-	ubyte[] decryptor(ubyte[] buffer) {
-		switch (cipher) with (Cipher) {
-			case xor:
-				keybuf.length = buffer.length;
-				keyCycle.take(keybuf.length).copy(keybuf);
-				xorxcryptbuff(buffer, keybuf);
-				break;
-			case rkc1:
-				keybuf.length = buffer.length;
-				keyCycle.take(keybuf.length).copy(keybuf);
-				rkc1decryptbuff(buffer, keybuf);
-				break;
-			case aes256:
-				if (buffer.length % 16 != 0)
-					throw new Exception("Decryption buffer with AES256 encryption is not a multiple of 16! This indicates a corrupt file.");
-				for (int i = 0; i < buffer.length; i += 16) {
-					aes.decrypt(buffer[i..i+16]);					
-				}				
-				break;
-			default:
-				assert(0);
-		}
-
-		return buffer;
-	}
-
-	return &decryptor;
+	return decryptor;
 }
 
 void xorxcryptbuff(ubyte[] buffer, ubyte[] keybuffer) {
