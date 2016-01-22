@@ -447,6 +447,13 @@ ulong readAuthChunkSize(File inFile, Hash hash) {
 	return chunkSize;
 }
 
+void writeAuthChunkSize(File outFile, ulong authChunkSize) {
+	ubyte[8] authChunkSizeBytes;
+
+	authChunkSizeBytes = nativeToLittleEndian(authChunkSize);
+	outFile.rawWrite(authChunkSizeBytes);
+}
+
 void writeFileSize(File outFile, File inFile) {
 	ulong fsize = inFile.size;
 	ubyte[] sizearr;
@@ -516,7 +523,7 @@ void writeAuthToken(File inFile, File outFile, Hash hash, Encryptor encrypt) {
 			outFile.rawWrite(encrypt(token));
 			break;
 		case sha256:
-			outFile.rawWrite(nativeToLittleEndian(authChunkSize));
+			writeAuthChunkSize(outFile, authChunkSize);
 			pos = inFile.tell();
 			buf = new ubyte[authChunkSize];
 			buf = inFile.rawRead(buf);
