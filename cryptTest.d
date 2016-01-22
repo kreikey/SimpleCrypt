@@ -5,8 +5,6 @@ import std.range;
 import std.file;
 import std.algorithm;
 import std.traits;
-//import std.uni;
-//import std.utf;
 import std.string;
 
 enum string authtoken = "<----------------- encrypted with SimpleCrypt ----------------->";
